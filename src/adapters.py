@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from common import complete_cut, find_subsequence, sha256_ints, token_safe_cut
@@ -207,8 +208,8 @@ class GptOssAdapter(ReasoningAdapter):
 
 class Ministral3ReasoningAdapter(ReasoningAdapter):
     name = "ministral3_reasoning"
-    prompt_contains_reasoning_open = True
-    reasoning_open_optional = True
+    prompt_contains_reasoning_open = False
+    reasoning_open_optional = False
 
     def __init__(self, processor_or_tokenizer: Any, profile: dict[str, Any]) -> None:
                                                                                
@@ -216,7 +217,30 @@ class Ministral3ReasoningAdapter(ReasoningAdapter):
         self.processor = processor_or_tokenizer
         self.tokenizer = processor_or_tokenizer
         self.profile = profile
+        self.system_prompt_message = self._load_system_prompt_message()
         self.markers = self._markers()
+
+    def _load_system_prompt_message(self) -> dict[str, Any]:
+        tokenizer_path = self.profile.get("_local_tokenizer_path")
+        if not tokenizer_path:
+            raise RuntimeError("Ministral adapter requires _local_tokenizer_path for SYSTEM_PROMPT.txt")
+        text = (Path(tokenizer_path) / "SYSTEM_PROMPT.txt").read_text(encoding="utf-8")
+        begin = text.find("[THINK]")
+        end = text.find("[/THINK]")
+        if begin < 0 or end < begin:
+            raise RuntimeError("Ministral SYSTEM_PROMPT.txt is missing [THINK]...[/THINK] markers")
+        return {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": text[:begin]},
+                {
+                    "type": "thinking",
+                    "thinking": text[begin + len("[THINK]") : end],
+                    "closed": True,
+                },
+                {"type": "text", "text": text[end + len("[/THINK]") :]},
+            ],
+        }
 
     def _markers(self) -> MarkerSet:
         eos_id = getattr(self.tokenizer, "eos_token_id", None)
@@ -234,7 +258,7 @@ class Ministral3ReasoningAdapter(ReasoningAdapter):
 
     def build_prompt_ids(self, question: str) -> list[int]:
         values = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": question}],
+            [self.system_prompt_message, {"role": "user", "content": question}],
             tokenize=True,
             add_generation_prompt=True,
             return_tensors=None,
@@ -246,7 +270,8 @@ class Ministral3ReasoningAdapter(ReasoningAdapter):
             values = values.tolist()
         if values and isinstance(values[0], list):
             values = values[0]
-        return [int(value) for value in values] + list(self.markers.reasoning_open)
+        return [int(value) for value in values]
+
 
 class Gemma4Adapter(ReasoningAdapter):
     name = "gemma4"

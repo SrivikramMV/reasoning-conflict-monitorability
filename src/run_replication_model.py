@@ -95,8 +95,10 @@ class VllmReplication:
                     "special_tokens_map.json",
                     "chat_template.jinja",
                     "processor_config.json",
+                    "SYSTEM_PROMPT.txt",
                 ],
             )
+            self.profile["_local_tokenizer_path"] = tokenizer_path
             self.tokenizer = MistralCommonBackend.from_pretrained(tokenizer_path)
         else:
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -226,8 +228,13 @@ class VllmReplication:
                     "generated_token_count": clean.get("generated_token_count"),
                     "thought_token_count": len(clean.get("thought_token_ids", [])),
                     "answer_token_count": len(clean.get("answer_token_ids", [])),
-                    "decoded_text_head": clean.get("generated_text", "")[:2000],
-                    "decoded_text_tail": clean.get("generated_text", "")[-2000:],
+                    "raw_response_head": clean.get("raw_response", "")[:2000],
+                    "raw_response_tail": clean.get("raw_response", "")[-2000:],
+                    "generated_continuation_head": clean.get("generated_continuation", "")[:2000],
+                    "generated_continuation_tail": clean.get("generated_continuation", "")[-2000:],
+                    "thought_head": clean.get("thought", "")[:2000],
+                    "thought_tail": clean.get("thought", "")[-2000:],
+                    "generated_token_ids_tail": clean.get("generated_token_ids", [])[-120:],
                 },
             )
             raise RuntimeError(
