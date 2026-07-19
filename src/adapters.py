@@ -19,6 +19,7 @@ class MarkerSet:
 class ReasoningAdapter:
     name = "base"
     prompt_contains_reasoning_open = False
+    reasoning_open_optional = False
 
     def __init__(self, processor_or_tokenizer: Any, profile: dict[str, Any]) -> None:
         self.processor = processor_or_tokenizer
@@ -77,6 +78,14 @@ class ReasoningAdapter:
                 boundary_start, boundary_end = find_subsequence(
                     response_ids, self.markers.answer_boundary, start=content_start
                 )
+            except ValueError:
+                pass
+        elif self.reasoning_open_optional:
+            try:
+                boundary_start, boundary_end = find_subsequence(
+                    response_ids, self.markers.answer_boundary, start=0
+                )
+                content_start = 0
             except ValueError:
                 pass
         terminal_index = None
@@ -199,6 +208,7 @@ class GptOssAdapter(ReasoningAdapter):
 class Ministral3ReasoningAdapter(ReasoningAdapter):
     name = "ministral3_reasoning"
     prompt_contains_reasoning_open = False
+    reasoning_open_optional = True
 
     def __init__(self, processor_or_tokenizer: Any, profile: dict[str, Any]) -> None:
                                                                                
