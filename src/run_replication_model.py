@@ -205,7 +205,7 @@ class VllmReplication:
             "primary",
             prompt,
             self.adapter.clean_response_prefix(),
-            int(self.config["runtime_smoke_max_tokens"]),
+            int(self.config["generation_limits"]["clean"]),
             {
                 **pair_metadata(pair),
                 "stage": "runtime_smoke",
@@ -215,6 +215,21 @@ class VllmReplication:
         )
         clean = self.generate_chunk([clean_request])[0]
         if clean["parse_status"] != "ok" or len(clean["thought_token_ids"]) < 12:
+            atomic_write_json(
+                self.manifest_root / "runtime_smoke_failed_clean_probe.json",
+                {
+                    "created_at_utc": utc_now(),
+                    "model_key": self.model_key,
+                    "parse_status": clean["parse_status"],
+                    "finish_reason": clean.get("finish_reason"),
+                    "truncated": clean.get("truncated"),
+                    "generated_token_count": clean.get("generated_token_count"),
+                    "thought_token_count": len(clean.get("thought_token_ids", [])),
+                    "answer_token_count": len(clean.get("answer_token_ids", [])),
+                    "decoded_text_head": clean.get("generated_text", "")[:2000],
+                    "decoded_text_tail": clean.get("generated_text", "")[-2000:],
+                },
+            )
             raise RuntimeError(
                 "Runtime smoke failed to recover a complete model-native reasoning span: "
                 f"{clean['parse_status']}"
