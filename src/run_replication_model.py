@@ -13,7 +13,7 @@ from typing import Any
 
 import torch
 import transformers
-from huggingface_hub import model_info, snapshot_download
+from huggingface_hub import model_info
 from transformers import AutoConfig, AutoTokenizer
 
 from adapters import ReasoningAdapter, make_adapter
@@ -81,29 +81,9 @@ class VllmReplication:
             int(self.config["heartbeat_seconds"]),
             int(self.config["expected_rows"]["new_rows_total"]),
         )
-        if self.profile.get("tokenizer_backend") == "mistral_common":
-            from transformers import MistralCommonBackend
-
-            tokenizer_path = snapshot_download(
-                repo_id=self.profile["model_id"],
-                revision=self.profile["revision"],
-                token=os.getenv("HF_TOKEN"),
-                allow_patterns=[
-                    "tekken.json",
-                    "tokenizer.json",
-                    "tokenizer_config.json",
-                    "special_tokens_map.json",
-                    "chat_template.jinja",
-                    "processor_config.json",
-                    "SYSTEM_PROMPT.txt",
-                ],
-            )
-            self.profile["_local_tokenizer_path"] = tokenizer_path
-            self.tokenizer = MistralCommonBackend.from_pretrained(tokenizer_path)
-        else:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.profile["model_id"], revision=self.profile["revision"], token=os.getenv("HF_TOKEN")
-            )
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.profile["model_id"], revision=self.profile["revision"], token=os.getenv("HF_TOKEN")
+        )
         self.adapter: ReasoningAdapter = make_adapter(
             self.profile["adapter"], self.tokenizer, self.profile
         )
@@ -181,9 +161,6 @@ class VllmReplication:
         }
         if self.profile.get("language_model_only"):
             kwargs["language_model_only"] = True
-        for optional_key in ("tokenizer_mode", "config_format", "load_format"):
-            if self.profile.get(optional_key):
-                kwargs[optional_key] = self.profile[optional_key]
         self.llm = LLM(**kwargs)
         atomic_write_json(
             self.manifest_root / "runtime.json",
@@ -207,7 +184,7 @@ class VllmReplication:
             "primary",
             prompt,
             self.adapter.clean_response_prefix(),
-            int(self.config["generation_limits"]["clean"]),
+            int(self.config["runtime_smoke_max_tokens"]),
             {
                 **pair_metadata(pair),
                 "stage": "runtime_smoke",
@@ -217,26 +194,6 @@ class VllmReplication:
         )
         clean = self.generate_chunk([clean_request])[0]
         if clean["parse_status"] != "ok" or len(clean["thought_token_ids"]) < 12:
-            atomic_write_json(
-                self.manifest_root / "runtime_smoke_failed_clean_probe.json",
-                {
-                    "created_at_utc": utc_now(),
-                    "model_key": self.model_key,
-                    "parse_status": clean["parse_status"],
-                    "finish_reason": clean.get("finish_reason"),
-                    "truncated": clean.get("truncated"),
-                    "generated_token_count": clean.get("generated_token_count"),
-                    "thought_token_count": len(clean.get("thought_token_ids", [])),
-                    "answer_token_count": len(clean.get("answer_token_ids", [])),
-                    "raw_response_head": clean.get("raw_response", "")[:2000],
-                    "raw_response_tail": clean.get("raw_response", "")[-2000:],
-                    "generated_continuation_head": clean.get("generated_continuation", "")[:2000],
-                    "generated_continuation_tail": clean.get("generated_continuation", "")[-2000:],
-                    "thought_head": clean.get("thought", "")[:2000],
-                    "thought_tail": clean.get("thought", "")[-2000:],
-                    "generated_token_ids_tail": clean.get("generated_token_ids", [])[-120:],
-                },
-            )
             raise RuntimeError(
                 "Runtime smoke failed to recover a complete model-native reasoning span: "
                 f"{clean['parse_status']}"
@@ -899,7 +856,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--model-key", choices=["qwen35_9b", "gpt_oss_20b", "ministral3_8b_reasoning_2512"], required=True)
+    parser.add_argument("--model-key", choices=["qwen35_9b", "gpt_oss_20b"], required=True)
     args = parser.parse_args()
     VllmReplication(args.bundle_root, args.output_root, args.model_key).run()
 

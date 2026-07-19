@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from common import complete_cut, find_subsequence, sha256_ints, token_safe_cut
@@ -20,10 +19,6 @@ class MarkerSet:
 class ReasoningAdapter:
     name = "base"
     prompt_contains_reasoning_open = False
-    reasoning_open_optional = False
-    decoded_marker_fallback = False
-    reasoning_open_text = ""
-    answer_boundary_text = ""
 
     def __init__(self, processor_or_tokenizer: Any, profile: dict[str, Any]) -> None:
         self.processor = processor_or_tokenizer
@@ -63,20 +58,6 @@ class ReasoningAdapter:
             input_suffix += self.markers.answer_boundary
         return list(prompt_ids) + input_suffix, response_prefix, cut
 
-    def _char_to_token_boundary(self, ids: list[int], char_offset: int) -> int:
-
-        low, high = 0, len(ids)
-        while low < high:
-            mid = (low + high) // 2
-            text = self.tokenizer.decode(
-                ids[:mid], skip_special_tokens=False, clean_up_tokenization_spaces=False
-            )
-            if len(text) < char_offset:
-                low = mid + 1
-            else:
-                high = mid
-        return low
-
     def parse_response(
         self,
         response_prefix_ids: list[int],
@@ -98,14 +79,6 @@ class ReasoningAdapter:
                 )
             except ValueError:
                 pass
-        elif self.reasoning_open_optional:
-            try:
-                boundary_start, boundary_end = find_subsequence(
-                    response_ids, self.markers.answer_boundary, start=0
-                )
-                content_start = 0
-            except ValueError:
-                pass
         terminal_index = None
         terminal_set = set(self.markers.terminal_ids)
         for index in range(boundary_end or 0, len(response_ids)):
@@ -113,29 +86,6 @@ class ReasoningAdapter:
                 terminal_index = index
                 break
         response_stop = terminal_index if terminal_index is not None else len(response_ids)
-        if self.decoded_marker_fallback and (content_start is None or boundary_start is None or boundary_end is None):
-            decoded_response = self.tokenizer.decode(
-                response_ids[:response_stop],
-                skip_special_tokens=False,
-                clean_up_tokenization_spaces=False,
-            )
-            open_text = self.reasoning_open_text
-            boundary_text = self.answer_boundary_text
-            open_char = decoded_response.find(open_text) if open_text else -1
-            boundary_char = (
-                decoded_response.find(boundary_text, open_char + len(open_text))
-                if open_char >= 0 and boundary_text
-                else -1
-            )
-            if open_char >= 0 and boundary_char >= 0:
-                open_start = self._char_to_token_boundary(response_ids[:response_stop], open_char)
-                content_start = self._char_to_token_boundary(
-                    response_ids[:response_stop], open_char + len(open_text)
-                )
-                boundary_start = self._char_to_token_boundary(response_ids[:response_stop], boundary_char)
-                boundary_end = self._char_to_token_boundary(
-                    response_ids[:response_stop], boundary_char + len(boundary_text)
-                )
         if content_start is None:
             thought_ids: list[int] = []
             final_ids = response_ids[:response_stop]
@@ -246,75 +196,6 @@ class GptOssAdapter(ReasoningAdapter):
         )
         return self._encode(rendered)
 
-class Ministral3ReasoningAdapter(ReasoningAdapter):
-    name = "ministral3_reasoning"
-    prompt_contains_reasoning_open = False
-    reasoning_open_optional = False
-    decoded_marker_fallback = True
-    reasoning_open_text = "[THINK]"
-    answer_boundary_text = "[/THINK]"
-
-    def __init__(self, processor_or_tokenizer: Any, profile: dict[str, Any]) -> None:
-                                                                               
-                                                                            
-        self.processor = processor_or_tokenizer
-        self.tokenizer = processor_or_tokenizer
-        self.profile = profile
-        self.system_prompt_message = self._load_system_prompt_message()
-        self.markers = self._markers()
-
-    def _load_system_prompt_message(self) -> dict[str, Any]:
-        tokenizer_path = self.profile.get("_local_tokenizer_path")
-        if not tokenizer_path:
-            raise RuntimeError("Ministral adapter requires _local_tokenizer_path for SYSTEM_PROMPT.txt")
-        text = (Path(tokenizer_path) / "SYSTEM_PROMPT.txt").read_text(encoding="utf-8")
-        begin = text.find("[THINK]")
-        end = text.find("[/THINK]")
-        if begin < 0 or end < begin:
-            raise RuntimeError("Ministral SYSTEM_PROMPT.txt is missing [THINK]...[/THINK] markers")
-        return {
-            "role": "system",
-            "content": [
-                {"type": "text", "text": text[:begin]},
-                {
-                    "type": "thinking",
-                    "thinking": text[begin + len("[THINK]") : end],
-                    "closed": True,
-                },
-                {"type": "text", "text": text[end + len("[/THINK]") :]},
-            ],
-        }
-
-    def _markers(self) -> MarkerSet:
-        eos_id = getattr(self.tokenizer, "eos_token_id", None)
-        if eos_id is None:
-            eos_id = self.tokenizer.convert_tokens_to_ids("</s>")
-        eos = int(eos_id)
-        pad_id = getattr(self.tokenizer, "pad_token_id", None)
-        pad = int(pad_id) if pad_id is not None else eos
-        return MarkerSet(
-            reasoning_open=self._encode("[THINK]"),
-            answer_boundary=self._encode("[/THINK]"),
-            terminal_ids=[eos],
-            pad_token_id=pad,
-        )
-
-    def build_prompt_ids(self, question: str) -> list[int]:
-        values = self.tokenizer.apply_chat_template(
-            [self.system_prompt_message, {"role": "user", "content": question}],
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors=None,
-            return_dict=False,
-        )
-        if isinstance(values, dict):
-            values = values["input_ids"]
-        if hasattr(values, "tolist"):
-            values = values.tolist()
-        if values and isinstance(values[0], list):
-            values = values[0]
-        return [int(value) for value in values]
-
 
 class Gemma4Adapter(ReasoningAdapter):
     name = "gemma4"
@@ -353,7 +234,6 @@ def make_adapter(name: str, processor_or_tokenizer: Any, profile: dict[str, Any]
     adapters = {
         "qwen35": Qwen35Adapter,
         "gpt_oss": GptOssAdapter,
-        "ministral3_reasoning": Ministral3ReasoningAdapter,
         "gemma4": Gemma4Adapter,
     }
     try:
