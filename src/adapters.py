@@ -207,7 +207,7 @@ class GptOssAdapter(ReasoningAdapter):
 
 class Ministral3ReasoningAdapter(ReasoningAdapter):
     name = "ministral3_reasoning"
-    prompt_contains_reasoning_open = False
+    prompt_contains_reasoning_open = True
     reasoning_open_optional = True
 
     def __init__(self, processor_or_tokenizer: Any, profile: dict[str, Any]) -> None:
@@ -246,7 +246,7 @@ class Ministral3ReasoningAdapter(ReasoningAdapter):
             values = values.tolist()
         if values and isinstance(values[0], list):
             values = values[0]
-        return [int(value) for value in values]
+        return [int(value) for value in values] + list(self.markers.reasoning_open)
 
 class Gemma4Adapter(ReasoningAdapter):
     name = "gemma4"
