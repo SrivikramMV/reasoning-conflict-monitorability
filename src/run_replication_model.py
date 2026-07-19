@@ -244,6 +244,7 @@ class VllmReplication:
             temperature=temperature,
             top_p=float(request["top_p"]) if temperature > 0 else 1.0,
             top_k=int(request["top_k"]) if temperature > 0 else -1,
+            repetition_penalty=float(request["repetition_penalty"]),
             seed=int(request["seed"]),
             max_tokens=int(request["max_new_tokens"]),
             stop_token_ids=self.adapter.markers.terminal_ids,
@@ -288,6 +289,7 @@ class VllmReplication:
                 "temperature": request["temperature"],
                 "top_p": request["top_p"],
                 "top_k": request["top_k"],
+                "repetition_penalty": request["repetition_penalty"],
                 "batch_size_realised": len(requests),
                 "batch_elapsed_seconds": elapsed,
                 "created_at_utc": utc_now(),
@@ -413,6 +415,7 @@ class VllmReplication:
             "temperature": temperature,
             "top_p": float(self.profile["top_p"]),
             "top_k": int(self.profile["top_k"]),
+            "repetition_penalty": float(self.profile.get("repetition_penalty", 1.0)),
             "metadata": metadata,
         }
 
