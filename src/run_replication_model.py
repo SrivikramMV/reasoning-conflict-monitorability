@@ -877,7 +877,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bundle-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--model-key", choices=["qwen35_9b", "gpt_oss_20b"], required=True)
+    parser.add_argument("--model-key", choices=["qwen35_9b", "gpt_oss_20b", "ministral3_8b_reasoning_2512"], required=True)
     args = parser.parse_args()
     VllmReplication(args.bundle_root, args.output_root, args.model_key).run()
 
