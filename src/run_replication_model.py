@@ -13,7 +13,7 @@ from typing import Any
 
 import torch
 import transformers
-from huggingface_hub import model_info
+from huggingface_hub import model_info, snapshot_download
 from transformers import AutoConfig, AutoTokenizer
 
 from adapters import ReasoningAdapter, make_adapter
@@ -81,9 +81,27 @@ class VllmReplication:
             int(self.config["heartbeat_seconds"]),
             int(self.config["expected_rows"]["new_rows_total"]),
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.profile["model_id"], revision=self.profile["revision"], token=os.getenv("HF_TOKEN")
-        )
+        if self.profile.get("tokenizer_backend") == "mistral_common":
+            from transformers import MistralCommonBackend
+
+            tokenizer_path = snapshot_download(
+                repo_id=self.profile["model_id"],
+                revision=self.profile["revision"],
+                token=os.getenv("HF_TOKEN"),
+                allow_patterns=[
+                    "tekken.json",
+                    "tokenizer.json",
+                    "tokenizer_config.json",
+                    "special_tokens_map.json",
+                    "chat_template.jinja",
+                    "processor_config.json",
+                ],
+            )
+            self.tokenizer = MistralCommonBackend.from_pretrained(tokenizer_path)
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.profile["model_id"], revision=self.profile["revision"], token=os.getenv("HF_TOKEN")
+            )
         self.adapter: ReasoningAdapter = make_adapter(
             self.profile["adapter"], self.tokenizer, self.profile
         )
@@ -161,6 +179,9 @@ class VllmReplication:
         }
         if self.profile.get("language_model_only"):
             kwargs["language_model_only"] = True
+        for optional_key in ("tokenizer_mode", "config_format", "load_format"):
+            if self.profile.get(optional_key):
+                kwargs[optional_key] = self.profile[optional_key]
         self.llm = LLM(**kwargs)
         atomic_write_json(
             self.manifest_root / "runtime.json",

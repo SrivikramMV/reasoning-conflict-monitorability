@@ -196,6 +196,36 @@ class GptOssAdapter(ReasoningAdapter):
         )
         return self._encode(rendered)
 
+class Ministral3ReasoningAdapter(ReasoningAdapter):
+    name = "ministral3_reasoning"
+    prompt_contains_reasoning_open = False
+
+    def _markers(self) -> MarkerSet:
+        eos = int(self.tokenizer.eos_token_id)
+        pad_id = getattr(self.tokenizer, "pad_token_id", None)
+        pad = int(pad_id) if pad_id is not None else eos
+        return MarkerSet(
+            reasoning_open=self._encode("[THINK]"),
+            answer_boundary=self._encode("[/THINK]"),
+            terminal_ids=[eos],
+            pad_token_id=pad,
+        )
+
+    def build_prompt_ids(self, question: str) -> list[int]:
+        values = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": question}],
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors=None,
+            return_dict=False,
+        )
+        if isinstance(values, dict):
+            values = values["input_ids"]
+        if hasattr(values, "tolist"):
+            values = values.tolist()
+        if values and isinstance(values[0], list):
+            values = values[0]
+        return [int(value) for value in values]
 
 class Gemma4Adapter(ReasoningAdapter):
     name = "gemma4"
@@ -234,6 +264,7 @@ def make_adapter(name: str, processor_or_tokenizer: Any, profile: dict[str, Any]
     adapters = {
         "qwen35": Qwen35Adapter,
         "gpt_oss": GptOssAdapter,
+        "ministral3_reasoning": Ministral3ReasoningAdapter,
         "gemma4": Gemma4Adapter,
     }
     try:
