@@ -200,8 +200,19 @@ class Ministral3ReasoningAdapter(ReasoningAdapter):
     name = "ministral3_reasoning"
     prompt_contains_reasoning_open = False
 
+    def __init__(self, processor_or_tokenizer: Any, profile: dict[str, Any]) -> None:
+                                                                               
+                                                                            
+        self.processor = processor_or_tokenizer
+        self.tokenizer = processor_or_tokenizer
+        self.profile = profile
+        self.markers = self._markers()
+
     def _markers(self) -> MarkerSet:
-        eos = int(self.tokenizer.eos_token_id)
+        eos_id = getattr(self.tokenizer, "eos_token_id", None)
+        if eos_id is None:
+            eos_id = self.tokenizer.convert_tokens_to_ids("</s>")
+        eos = int(eos_id)
         pad_id = getattr(self.tokenizer, "pad_token_id", None)
         pad = int(pad_id) if pad_id is not None else eos
         return MarkerSet(
