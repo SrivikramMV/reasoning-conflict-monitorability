@@ -213,6 +213,21 @@ def copy_frozen_tree(source: Path, destination: Path) -> None:
             shutil.copy2(path, target)
 
 
+
+
+def model_collection_complete(output_root: Path, model_key: str) -> bool:
+    counts = collect_counts(output_root, [model_key]).get(model_key, {})
+    if any(counts.get(stage, 0) != expected for stage, expected in EXPECTED.items()):
+        return False
+    summary_path = output_root / "models" / model_key / "manifests" / "diagnostic_quality_gate_summary.json"
+    if not summary_path.exists():
+        return False
+    try:
+        summary = read_json(summary_path)
+    except Exception:
+        return False
+    return bool(summary.get("complete"))
+
 def preserve_inputs(bundle_root: Path, output_root: Path) -> dict[str, Any]:
     copy_frozen_tree(bundle_root / "config", output_root / "frozen_inputs" / "config")
     copy_frozen_tree(bundle_root / "data", output_root / "frozen_inputs" / "data")
@@ -374,6 +389,21 @@ def main() -> None:
         )
         for model_key in args.models:
             active_model = model_key
+            if model_collection_complete(output_root, model_key):
+                append_log(
+                    log_dir / "run.log",
+                    f"SKIP {model_key}: complete checkpoints and passing quality gate already present",
+                )
+                write_progress(
+                    output_root,
+                    args.models,
+                    "running",
+                    model_key,
+                    [],
+                    heartbeat_seconds,
+                    message=f"Skipping {model_key}; complete passing diagnostics already present",
+                )
+                continue
             active_stages = ["candidate", "hidden", "masking"]
             active_command = [
                 sys.executable,
