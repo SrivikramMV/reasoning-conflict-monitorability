@@ -82,19 +82,19 @@ def load_transformers_model(profile: dict[str, Any]):
     }
     dtype = dtype_from_profile(profile)
     if dtype != "auto":
-        kwargs["torch_dtype"] = dtype
+        kwargs["dtype"] = dtype
     if profile["adapter"] == "gemma4":
         kwargs["device_map"] = {"": 0}
     else:
         kwargs["device_map"] = "auto"
     try:
-        kwargs["attn_implementation"] = "eager"
+        kwargs["attn_implementation"] = "sdpa"
         model = AutoModelForCausalLM.from_pretrained(profile["model_id"], **kwargs)
     except TypeError:
         kwargs.pop("attn_implementation", None)
         model = AutoModelForCausalLM.from_pretrained(profile["model_id"], **kwargs)
         try:
-            model.config._attn_implementation = "eager"
+            model.config._attn_implementation = "sdpa"
         except Exception:
             pass
     model.eval()
@@ -226,70 +226,195 @@ def find_question_span(row: dict[str, Any], adapter: Any) -> tuple[int, int]:
         return start, end
 
 
-def make_source_mask(length: int, row: dict[str, Any], adapter: Any, mask_condition: str, boundary_ids: list[int]) -> torch.Tensor:
+def source_spans(row: dict[str, Any], adapter: Any, boundary_ids: list[int]) -> dict[str, Any]:
+    question_start, question_end = find_question_span(row, adapter)
+    trace_start = len(row["prompt_token_ids"])
+    trace_end = max(trace_start, len(boundary_ids) - len(adapter.markers.answer_boundary))
+    structural_positions = []
+    structural_ids = set(
+        adapter.markers.reasoning_open
+        + adapter.markers.answer_boundary
+        + adapter.markers.terminal_ids
+    )
+    for index, token_id in enumerate(boundary_ids):
+        if int(token_id) in structural_ids:
+            structural_positions.append(index)
+    return {
+        "question": [question_start, question_end],
+        "trace": [trace_start, trace_end],
+        "protected_structural_positions": structural_positions,
+        "protected_structural_token_ids": sorted(int(value) for value in structural_ids),
+    }
+
+
+def make_source_mask(
+    length: int,
+    row: dict[str, Any],
+    adapter: Any,
+    mask_condition: str,
+    boundary_ids: list[int],
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    if mask_condition not in {"none", "question", "trace", "joint"}:
+        raise ValueError(f"Unknown source-mask condition: {mask_condition}")
+    if length < len(boundary_ids):
+        raise ValueError("Attention-mask length cannot be shorter than the frozen boundary")
+    spans = source_spans(row, adapter, boundary_ids)
+    protected = set(spans["protected_structural_positions"])
     mask = torch.ones(length, dtype=torch.long)
-    protected = set(adapter.markers.reasoning_open + adapter.markers.answer_boundary + adapter.markers.terminal_ids)
-    spans: list[tuple[int, int]] = []
-    q_span = find_question_span(row, adapter)
-    trace_span = (len(row["prompt_token_ids"]), max(len(row["prompt_token_ids"]), len(boundary_ids) - len(adapter.markers.answer_boundary)))
+    selected_spans: list[list[int]] = []
     if mask_condition in {"question", "joint"}:
-        spans.append(q_span)
+        selected_spans.append(spans["question"])
     if mask_condition in {"trace", "joint"}:
-        spans.append(trace_span)
-    for start, end in spans:
-        for index in range(max(0, start), min(length, end)):
-            if int(boundary_ids[index]) not in protected:
+        selected_spans.append(spans["trace"])
+    masked_positions: list[int] = []
+    for start, end in selected_spans:
+        for index in range(max(0, int(start)), min(len(boundary_ids), int(end))):
+            if index not in protected:
                 mask[index] = 0
-    return mask
+                masked_positions.append(index)
+    provenance = {
+        "mask_condition": mask_condition,
+        "question_span": spans["question"],
+        "trace_span": spans["trace"],
+        "protected_structural_positions": spans["protected_structural_positions"],
+        "protected_structural_token_ids": spans["protected_structural_token_ids"],
+        "masked_position_count": len(masked_positions),
+        "masked_positions": masked_positions,
+        "initial_prefix_mask_applied": True,
+        "prefix_mask_sha256": sha256_ints(mask[: len(boundary_ids)].tolist()),
+    }
+    return mask, provenance
 
 
-def generate_with_source_mask(model: Any, adapter: Any, row: dict[str, Any], boundary_ids: list[int], mask_condition: str, max_new_tokens: int) -> dict[str, Any]:
-    device = device_of(model)
-    generated: list[int] = []
-    stop_ids = set(adapter.markers.terminal_ids)
-    prefix_ids = list(boundary_ids)
-    first_mask = torch.ones(len(prefix_ids), dtype=torch.long, device=device)
-    try:
-        with torch.inference_mode():
-            input_tensor = torch.tensor([prefix_ids], dtype=torch.long, device=device)
-            output = model(input_ids=input_tensor, attention_mask=first_mask.unsqueeze(0), use_cache=True)
-            past = output.past_key_values
-            next_id = int(output.logits[:, -1, :].argmax(dim=-1).item())
-        generated.append(next_id)
-        del input_tensor, output
-        if next_id in stop_ids:
-            return parse_continuation(adapter, row, generated, max_new_tokens)
-        for _ in range(max_new_tokens - 1):
-            full_len = len(prefix_ids) + len(generated)
-            mask = make_source_mask(full_len, row, adapter, mask_condition, boundary_ids).to(device)
-            new_token = torch.tensor([[generated[-1]]], dtype=torch.long, device=device)
-            with torch.inference_mode():
-                output = model(input_ids=new_token, attention_mask=mask.unsqueeze(0), past_key_values=past, use_cache=True)
-                past = output.past_key_values
-                next_id = int(output.logits[:, -1, :].argmax(dim=-1).item())
-            generated.append(next_id)
-            del output, new_token
-            if next_id in stop_ids:
-                break
-    except Exception as exc:
-        raise RuntimeError(f"source masking failed for {row['diagnostic_parent_id']} {mask_condition}: {exc}") from exc
-    return parse_continuation(adapter, row, generated, max_new_tokens)
-
-
-def parse_continuation(adapter: Any, row: dict[str, Any], generated_ids: list[int], max_new_tokens: int) -> dict[str, Any]:
-    answer_ids = []
-    stop_reason = "max_new_tokens" if len(generated_ids) >= max_new_tokens else "generation_stopped_without_registered_token"
+def parse_continuation(
+    adapter: Any,
+    row: dict[str, Any],
+    generated_ids: list[int],
+    max_new_tokens: int,
+    first_endpoint_tokens: int = 192,
+    backend_finish_reason: str | None = None,
+    backend_stop_reason: Any = None,
+) -> dict[str, Any]:
+    answer_ids: list[int] = []
+    terminal_ids = set(adapter.markers.terminal_ids)
+    registered_terminal = None
     for value in generated_ids:
-        if value in set(adapter.markers.terminal_ids):
-            stop_reason = "terminal"
+        if int(value) in terminal_ids:
+            registered_terminal = int(value)
             break
         answer_ids.append(int(value))
+    if registered_terminal is not None:
+        stop_reason = "registered_terminal"
+    elif len(generated_ids) >= max_new_tokens:
+        stop_reason = "max_new_tokens"
+    else:
+        stop_reason = "backend_stop_without_registered_terminal"
     text = decode(adapter, answer_ids)
+    endpoint_ids = answer_ids[: int(first_endpoint_tokens)]
     return {
-        "generated_token_ids": [int(v) for v in generated_ids],
+        "generated_token_ids": [int(value) for value in generated_ids],
         "generated_token_count": len(generated_ids),
         "final_answer_token_ids": answer_ids,
         "final_answer": text.strip(),
+        "first_endpoint_token_limit": int(first_endpoint_tokens),
+        "first_endpoint_token_ids": endpoint_ids,
+        "first_endpoint_text": decode(adapter, endpoint_ids).strip(),
+        "registered_terminal_token_id": registered_terminal,
         "truncated": stop_reason == "max_new_tokens",
         "stop_reason": stop_reason,
+        "backend_finish_reason": backend_finish_reason,
+        "backend_stop_reason": backend_stop_reason,
     }
+
+
+def generate_source_mask_variants(
+    model: Any,
+    adapter: Any,
+    row: dict[str, Any],
+    boundary_ids: list[int],
+    mask_conditions: list[str],
+    max_new_tokens: int,
+    first_endpoint_tokens: int,
+) -> dict[str, dict[str, Any]]:
+
+
+
+
+
+    device = device_of(model)
+    batch_size = len(mask_conditions)
+    prefix = torch.tensor([boundary_ids] * batch_size, dtype=torch.long, device=device)
+    initial_masks = []
+    provenances = []
+    for condition in mask_conditions:
+        mask, provenance = make_source_mask(
+            len(boundary_ids), row, adapter, condition, boundary_ids
+        )
+        initial_masks.append(mask)
+        provenances.append(provenance)
+    running_mask = torch.stack(initial_masks, dim=0).to(device)
+    generated: list[list[int]] = [[] for _ in mask_conditions]
+    active = torch.ones(batch_size, dtype=torch.bool, device=device)
+    terminal_ids = set(int(value) for value in adapter.markers.terminal_ids)
+    pad_id = int(adapter.markers.pad_token_id)
+
+    try:
+        with torch.inference_mode():
+            output = model(
+                input_ids=prefix,
+                attention_mask=running_mask,
+                use_cache=True,
+            )
+            past = output.past_key_values
+            next_ids = output.logits[:, -1, :].argmax(dim=-1)
+        del output, prefix
+
+        for step in range(max_new_tokens):
+            active_before = active.clone()
+            for index in range(batch_size):
+                if bool(active_before[index]):
+                    token_id = int(next_ids[index].item())
+                    generated[index].append(token_id)
+                    if token_id in terminal_ids:
+                        active[index] = False
+            if step + 1 >= max_new_tokens or not bool(active.any()):
+                break
+
+            visible_column = active_before.long().unsqueeze(1)
+            running_mask = torch.cat([running_mask, visible_column], dim=1)
+            model_tokens = torch.where(
+                active_before,
+                next_ids,
+                torch.full_like(next_ids, pad_id),
+            ).unsqueeze(1)
+            with torch.inference_mode():
+                output = model(
+                    input_ids=model_tokens,
+                    attention_mask=running_mask,
+                    past_key_values=past,
+                    use_cache=True,
+                )
+                past = output.past_key_values
+                next_ids = output.logits[:, -1, :].argmax(dim=-1)
+            del output, model_tokens
+    except Exception as exc:
+        raise RuntimeError(
+            f"source masking failed for {row['diagnostic_parent_id']}: {exc}"
+        ) from exc
+
+    results: dict[str, dict[str, Any]] = {}
+    for condition, token_ids, provenance in zip(
+        mask_conditions, generated, provenances
+    ):
+        parsed = parse_continuation(
+            adapter,
+            row,
+            token_ids,
+            max_new_tokens,
+            first_endpoint_tokens,
+            backend_finish_reason="greedy_transformers",
+            backend_stop_reason=None,
+        )
+        parsed["mask_provenance"] = provenance
+        results[condition] = parsed
+    return results
